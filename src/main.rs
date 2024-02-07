@@ -40,8 +40,13 @@ pub fn setup_logger(level: &str) -> Result<()> {
     Ok(())
 }
 
+// GUI-specific things
 static USER_HIDDEN: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
-static MAP_STORY_KEYS_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+// Auto features
+static AUTO_STORY_KEYS_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+// Utils features
+static UTILS_MAP_STORY_KEYS_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+static UTILS_CUSTOM_STORY_KEYS: OnceLock<Arc<Mutex<Option<Key>>>> = OnceLock::new();
 static mut OUR_HWND: OnceLock<HWND> = OnceLock::new();
 
 fn get_hsr_hwnd() -> HWND {
@@ -61,9 +66,14 @@ fn is_hsr_or_overlay_inactive(hsr_hwnd: HWND, our_hwnd: HWND) -> bool {
 fn main() -> eframe::Result<()> {
     setup_logger("debug").unwrap();
     // Initialize global variables
+    // GUI
     USER_HIDDEN.set(Arc::new(Mutex::new(false))).unwrap();
-    MAP_STORY_KEYS_ENABLED
+    // Utils
+    UTILS_MAP_STORY_KEYS_ENABLED
         .set(Arc::new(Mutex::new(false)))
+        .unwrap();
+    UTILS_CUSTOM_STORY_KEYS
+        .set(Arc::new(Mutex::new(None)))
         .unwrap();
     // Initialize hotkey manager
     let manager = GlobalHotKeyManager::new().unwrap();
@@ -96,7 +106,8 @@ fn main() -> eframe::Result<()> {
     // Map story keys
     thread::spawn(|| {
         fn press_space_if_map_story_key() {
-            let map_story_keys_enabled = MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
+            let map_story_keys_enabled =
+                UTILS_MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
             if !*map_story_keys_enabled {
                 return;
             }
@@ -157,7 +168,9 @@ fn main() -> eframe::Result<()> {
 
 #[derive(Default)]
 struct RailersEgui {
-    map_story_keys: bool,
+    utils_map_story_keys: bool,
+    utils_msk_custom_key_enabled: bool,
+    utils_msk_custom_key: String,
     hsr_hwnd: Option<HWND>,
     trace_thread: bool,
 }
@@ -175,14 +188,42 @@ impl RailersEgui {
 fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
     egui::Window::new("Utils").show(ctx, |ui| {
         ui.label("These are utilities which enhance your gameplay experience.");
-        let map_story_keys_checkbox = ui.checkbox(
-            &mut railers_egui.map_story_keys,
-            "Map story keys (F & Enter to Space)",
+        ui.spacing();
+        ui.separator();
+        ui.label("Map story keys (F & Enter to Space)");
+        let map_story_keys_checkbox =
+            ui.checkbox(&mut railers_egui.utils_map_story_keys, "Enabled");
+        let msk_custom_key_checkbox = ui.checkbox(
+            &mut railers_egui.utils_msk_custom_key_enabled,
+            "Custom key (additionally to F & Enter)",
         );
+        let msk_custom_key_textbox_ui =
+            egui::TextEdit::singleline(&mut railers_egui.utils_msk_custom_key)
+                .hint_text("Key here, only one character is allowed.")
+                .char_limit(1);
+        let msk_custom_key_textbox = ui.add(msk_custom_key_textbox_ui);
+        // Logic
         if map_story_keys_checkbox.changed() {
-            debug!("Map story keys: {}", railers_egui.map_story_keys);
-            let mut map_story_keys_enabled = MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
-            *map_story_keys_enabled = railers_egui.map_story_keys;
+            debug!("Map story keys: {}", railers_egui.utils_map_story_keys);
+            let mut map_story_keys_enabled =
+                UTILS_MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
+            *map_story_keys_enabled = railers_egui.utils_map_story_keys;
+        }
+        if msk_custom_key_checkbox.changed() {
+            debug!(
+                "Custom key enabled: {}",
+                railers_egui.utils_msk_custom_key_enabled
+            );
+            // let mut custom_story_keys =
+            //     UTILS_CUSTOM_STORY_KEYS.get().unwrap().lock().unwrap();
+            // if railers_egui.utils_msk_custom_key_enabled {
+            //     *custom_story_keys = Some(Key::KeyF);
+            // } else {
+            //     *custom_story_keys = None;
+            // }
+        }
+        if msk_custom_key_textbox.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            debug!("Custom key: {}", railers_egui.utils_msk_custom_key);
         }
     });
 }
@@ -247,39 +288,57 @@ impl eframe::App for RailersEgui {
             if !self.trace_thread {
                 thread::spawn(|| {
                     let mut hidden = false;
+                    let mut previous_rect: RECT = Default::default();
+                    {
+                        let hsr_hwnd = get_hsr_hwnd();
+                        let fg_hwnd = GetForegroundWindow();
+                        debug!("First check");
+                        debug!("FG HWND: {:?}", fg_hwnd);
+                        debug!("HSR HWND: {:?}", hsr_hwnd);
+                        if hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd) {
+                            hidden = true;
+                            let hwnd = OUR_HWND.get().unwrap().clone();
+                            debug!("Trying to hide our window...");
+                            debug!("OUR HWND: {:?}", hwnd);
+                            ShowWindow(hwnd, SW_HIDE);
+                        }
+                    }
                     loop {
                         let hsr_hwnd = get_hsr_hwnd();
                         let hwnd = OUR_HWND.get().unwrap().clone();
-                        if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd)
-                            || USER_HIDDEN.get().unwrap().lock().unwrap().clone()
-                        {
+                        let user_hidden = USER_HIDDEN.get().unwrap().lock().unwrap().clone();
+                        if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) || user_hidden {
                             if hidden {
                                 continue;
                             }
                             hidden = true;
                             ShowWindow(OUR_HWND.get().unwrap().clone(), SW_HIDE);
-                            SetForegroundWindow(hsr_hwnd);
+                            if user_hidden {
+                                SetForegroundWindow(hsr_hwnd);
+                            }
                             continue;
                         }
                         let mut hsr_rect: RECT = Default::default();
                         GetWindowRect(hsr_hwnd, &mut hsr_rect).unwrap();
-                        // debug!("HSR Rectangle: {:?}", hsr_rect);
-                        SetWindowPos(
-                            hwnd,
-                            HWND_TOPMOST,
-                            // Idk why
-                            hsr_rect.left + 8,
-                            // 32 because of the title bar
-                            hsr_rect.top + 31,
-                            hsr_rect.right - hsr_rect.left - 16,
-                            hsr_rect.bottom - hsr_rect.top - 39,
-                            SWP_ASYNCWINDOWPOS,
-                        )
-                        .unwrap();
+                        if previous_rect != hsr_rect {
+                            SetWindowPos(
+                                hwnd,
+                                HWND_TOPMOST,
+                                // Idk why
+                                hsr_rect.left + 8,
+                                // 32 because of the title bar
+                                hsr_rect.top + 31,
+                                hsr_rect.right - hsr_rect.left - 16,
+                                hsr_rect.bottom - hsr_rect.top - 39,
+                                SWP_ASYNCWINDOWPOS,
+                            )
+                            .unwrap();
+                        }
                         if hidden {
                             ShowWindow(hwnd, SW_SHOW);
                             hidden = false;
                         }
+                        // debug!("HSR Rectangle: {:?}", hsr_rect);
                         thread::sleep(Duration::from_nanos(1));
                     }
                 });
