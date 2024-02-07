@@ -4,9 +4,10 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
-use log::{debug, info, error};
+use log::{debug, error, info, trace};
 use rdev::{listen, Event, EventType, Key};
 use std::{
+    ffi::c_void,
     sync::{Arc, Mutex, OnceLock},
     thread,
     time::Duration,
@@ -15,7 +16,8 @@ use tracing_subscriber::{self, fmt, EnvFilter};
 use windows::{
     core::{s, Result},
     Win32::{
-        Foundation::{HWND, RECT},
+        Foundation::{BOOL, HWND, RECT, TRUE},
+        Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED},
         UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
     },
 };
@@ -49,9 +51,9 @@ fn get_hsr_hwnd() -> HWND {
 fn is_hsr_or_overlay_inactive(hsr_hwnd: HWND, our_hwnd: HWND) -> bool {
     unsafe {
         let fg_hwnd = GetForegroundWindow();
-        debug!("FG HWND: {:?}", fg_hwnd);
-        debug!("HSR HWND: {:?}", hsr_hwnd);
-        debug!("OUR HWND: {:?}", our_hwnd);
+        trace!("FG HWND: {:?}", fg_hwnd);
+        trace!("HSR HWND: {:?}", hsr_hwnd);
+        trace!("OUR HWND: {:?}", our_hwnd);
         hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd && fg_hwnd != our_hwnd)
     }
 }
@@ -90,9 +92,9 @@ fn main() -> eframe::Result<()> {
             }
             thread::sleep(Duration::from_millis(10));
         }
-    }); 
-    // Map story keys   
-    thread::spawn(|| { 
+    });
+    // Map story keys
+    thread::spawn(|| {
         fn press_space_if_map_story_key() {
             let map_story_keys_enabled = MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
             if !*map_story_keys_enabled {
@@ -123,8 +125,8 @@ fn main() -> eframe::Result<()> {
         }
 
         fn callback(event: Event) {
-            // debug!("My callback {:?}", event); 
-            match event.event_type { 
+            // debug!("My callback {:?}", event);
+            match event.event_type {
                 rdev::EventType::KeyPress(code) => {
                     debug!("Key press: {:?}", code);
                     match code {
@@ -132,7 +134,7 @@ fn main() -> eframe::Result<()> {
                         Key::Return => press_space_if_map_story_key(),
                         _ => {}
                     }
-                }, 
+                }
                 _ => {}
             }
         }
@@ -231,6 +233,15 @@ impl eframe::App for RailersEgui {
                 if active_hwnd.0 == 0 {
                     return;
                 }
+                let mut attrib: BOOL = TRUE;
+                let attrib_ptr: *mut c_void = &mut attrib as *mut _ as *mut c_void;
+                DwmSetWindowAttribute(
+                    active_hwnd,
+                    DWMWA_TRANSITIONS_FORCEDISABLED,
+                    attrib_ptr,
+                    std::mem::size_of::<BOOL>() as u32,
+                )
+                .unwrap();
                 OUR_HWND.set(active_hwnd).unwrap();
             }
             if !self.trace_thread {
@@ -238,16 +249,16 @@ impl eframe::App for RailersEgui {
                     let mut hidden = false;
                     loop {
                         let hsr_hwnd = get_hsr_hwnd();
-                        let fg_hwnd = GetForegroundWindow();
                         let hwnd = OUR_HWND.get().unwrap().clone();
-                        if (hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd && fg_hwnd != hwnd))
+                        if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd)
                             || USER_HIDDEN.get().unwrap().lock().unwrap().clone()
                         {
                             if hidden {
                                 continue;
                             }
-                            ShowWindow(OUR_HWND.get().unwrap().clone(), SW_HIDE);
                             hidden = true;
+                            ShowWindow(OUR_HWND.get().unwrap().clone(), SW_HIDE);
+                            SetForegroundWindow(hsr_hwnd);
                             continue;
                         }
                         let mut hsr_rect: RECT = Default::default();
@@ -259,9 +270,9 @@ impl eframe::App for RailersEgui {
                             // Idk why
                             hsr_rect.left + 8,
                             // 32 because of the title bar
-                            hsr_rect.top + 30,
+                            hsr_rect.top + 31,
                             hsr_rect.right - hsr_rect.left - 16,
-                            hsr_rect.bottom - hsr_rect.top - 38,
+                            hsr_rect.bottom - hsr_rect.top - 39,
                             SWP_ASYNCWINDOWPOS,
                         )
                         .unwrap();
@@ -275,7 +286,7 @@ impl eframe::App for RailersEgui {
             }
             self.trace_thread = true;
             if self.hsr_hwnd.is_none() || GetWindow(self.hsr_hwnd.unwrap(), GW_CHILD).0 == 0 {
-                let hsr_hwnd = FindWindowA(s!("UnityWndClass"), s!("Honkai: Star Rail"));
+                let hsr_hwnd = get_hsr_hwnd();
                 if hsr_hwnd.0 != 0 {
                     self.hsr_hwnd = Some(hsr_hwnd);
                 } else {
