@@ -10,7 +10,7 @@ eframe = "0.26.0"
 egui = "0.26.0"
 global-hotkey = "0.4.2"
 log = "0.4.20"
-rdev = { version = "0.5.3", features = ["unstable_grab"] }
+rdev = "0.5.3"
 serde = "1.0.196"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }

@@ -4,7 +4,8 @@ use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
-use log::{debug, info};
+use log::{debug, info, error};
+use rdev::{listen, Event, EventType, Key};
 use std::{
     sync::{Arc, Mutex, OnceLock},
     thread,
@@ -38,39 +39,105 @@ pub fn setup_logger(level: &str) -> Result<()> {
 }
 
 static USER_HIDDEN: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+static MAP_STORY_KEYS_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+static mut OUR_HWND: OnceLock<HWND> = OnceLock::new();
+
+fn get_hsr_hwnd() -> HWND {
+    unsafe { FindWindowA(s!("UnityWndClass"), s!("Honkai: Star Rail")) }
+}
+
+fn is_hsr_or_overlay_inactive(hsr_hwnd: HWND, our_hwnd: HWND) -> bool {
+    unsafe {
+        let fg_hwnd = GetForegroundWindow();
+        debug!("FG HWND: {:?}", fg_hwnd);
+        debug!("HSR HWND: {:?}", hsr_hwnd);
+        debug!("OUR HWND: {:?}", our_hwnd);
+        hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd && fg_hwnd != our_hwnd)
+    }
+}
 
 fn main() -> eframe::Result<()> {
     setup_logger("debug").unwrap();
+    // Initialize global variables
     USER_HIDDEN.set(Arc::new(Mutex::new(false))).unwrap();
+    MAP_STORY_KEYS_ENABLED
+        .set(Arc::new(Mutex::new(false)))
+        .unwrap();
+    // Initialize hotkey manager
     let manager = GlobalHotKeyManager::new().unwrap();
-    // construct the hotkey
-    let hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::KeyN);
-
-    // register it
+    // Toggle GUI
+    let hotkey = HotKey::new(Some(Modifiers::SHIFT), Code::F10);
     manager.register(hotkey).unwrap();
-    debug!("Hotkey registered");
-    thread::spawn(move || loop {
-        if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
-            if event.state == HotKeyState::Released {
-                continue;
-            }
-            unsafe {
-                let hsr_hwnd = FindWindowA(s!("UnityWndClass"), s!("Honkai: Star Rail"));
-                let fg_hwnd = GetForegroundWindow();
-                let hwnd = OUR_HWND.get().unwrap().clone();
-                debug!("FG HWND: {:?}", fg_hwnd);
-                debug!("HSR HWND: {:?}", hsr_hwnd);
-                debug!("OUR HWND: {:?}", hwnd);
-                if hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd && fg_hwnd != hwnd) {
+    info!("Hotkey registered for GUI toggling.");
+    thread::spawn(move || {
+        loop {
+            if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+                if event.state == HotKeyState::Released {
                     continue;
+                } else {
+                    // This must be the GUI toggle hotkey
+                    unsafe {
+                        let hsr_hwnd = get_hsr_hwnd();
+                        let hwnd = OUR_HWND.get().unwrap().clone();
+                        if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) {
+                            continue;
+                        }
+                        debug!("Hotkey pressed: {:?}", event);
+                        let mut user_hidden = USER_HIDDEN.get().unwrap().lock().unwrap();
+                        *user_hidden = !*user_hidden;
+                    }
                 }
-                debug!("Hotkey pressed: {:?}", event);
-                let mut a = USER_HIDDEN.get().unwrap().lock().unwrap();
-                *a = !*a;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }); 
+    // Map story keys   
+    thread::spawn(|| { 
+        fn press_space_if_map_story_key() {
+            let map_story_keys_enabled = MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
+            if !*map_story_keys_enabled {
+                return;
+            }
+            let hsr_hwnd = get_hsr_hwnd();
+            let hwnd = unsafe { OUR_HWND.get().unwrap().clone() };
+            if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) {
+                return;
+            }
+            match rdev::simulate(&EventType::KeyPress(Key::Space)) {
+                Ok(()) => (),
+                Err(_) => {
+                    error!("We could not send {:?}", Key::Space);
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+            match rdev::simulate(&EventType::KeyRelease(Key::Space)) {
+                Ok(()) => (),
+                Err(_) => {
+                    error!("We could not send {:?}", Key::Space);
+                }
             }
         }
-        thread::sleep(Duration::from_millis(10));
+        // This will block.
+        if let Err(error) = listen(callback) {
+            println!("Error: {:?}", error)
+        }
+
+        fn callback(event: Event) {
+            // debug!("My callback {:?}", event); 
+            match event.event_type { 
+                rdev::EventType::KeyPress(code) => {
+                    debug!("Key press: {:?}", code);
+                    match code {
+                        Key::KeyF => press_space_if_map_story_key(),
+                        Key::Return => press_space_if_map_story_key(),
+                        _ => {}
+                    }
+                }, 
+                _ => {}
+            }
+        }
     });
+    info!("Hotkeys registered for story key mapping.");
     info!("Initializing Railers GUI...");
     let mut native_options = eframe::NativeOptions::default();
     native_options.viewport = ViewportBuilder::default()
@@ -91,7 +158,6 @@ struct RailersEgui {
     map_story_keys: bool,
     hsr_hwnd: Option<HWND>,
     trace_thread: bool,
-    user_hidden: bool,
 }
 
 impl RailersEgui {
@@ -113,7 +179,8 @@ fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
         );
         if map_story_keys_checkbox.changed() {
             debug!("Map story keys: {}", railers_egui.map_story_keys);
-            ui.ctx().request_repaint();
+            let mut map_story_keys_enabled = MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
+            *map_story_keys_enabled = railers_egui.map_story_keys;
         }
     });
 }
@@ -155,8 +222,6 @@ fn debug_window(ctx: &Context, railers_egui: &mut RailersEgui) {
     });
 }
 
-static mut OUR_HWND: OnceLock<HWND> = OnceLock::new();
-
 impl eframe::App for RailersEgui {
     fn update(&mut self, ctx: &Context, frame: &mut eframe::Frame) {
         // Get the window size
@@ -172,7 +237,7 @@ impl eframe::App for RailersEgui {
                 thread::spawn(|| {
                     let mut hidden = false;
                     loop {
-                        let hsr_hwnd = FindWindowA(s!("UnityWndClass"), s!("Honkai: Star Rail"));
+                        let hsr_hwnd = get_hsr_hwnd();
                         let fg_hwnd = GetForegroundWindow();
                         let hwnd = OUR_HWND.get().unwrap().clone();
                         if (hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd && fg_hwnd != hwnd))
