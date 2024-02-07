@@ -45,7 +45,8 @@ static USER_HIDDEN: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 // Auto features
 static AUTO_STORY_KEYS_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 // Utils features
-static UTILS_MAP_STORY_KEYS_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+static UTILS_MAP_STORY_KEY_F_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+static UTILS_MAP_STORY_KEY_ENTER_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 static UTILS_CUSTOM_STORY_KEYS: OnceLock<Arc<Mutex<Option<Key>>>> = OnceLock::new();
 static mut OUR_HWND: OnceLock<HWND> = OnceLock::new();
 
@@ -69,7 +70,10 @@ fn main() -> eframe::Result<()> {
     // GUI
     USER_HIDDEN.set(Arc::new(Mutex::new(false))).unwrap();
     // Utils
-    UTILS_MAP_STORY_KEYS_ENABLED
+    UTILS_MAP_STORY_KEY_F_ENABLED
+        .set(Arc::new(Mutex::new(false)))
+        .unwrap();
+    UTILS_MAP_STORY_KEY_ENTER_ENABLED
         .set(Arc::new(Mutex::new(false)))
         .unwrap();
     UTILS_CUSTOM_STORY_KEYS
@@ -105,10 +109,35 @@ fn main() -> eframe::Result<()> {
     });
     // Map story keys
     thread::spawn(|| {
-        fn press_space_if_map_story_key() {
-            let map_story_keys_enabled =
-                UTILS_MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
-            if !*map_story_keys_enabled {
+        fn press_space_if_map_story_key_f() {
+            let map_story_key_f_enabled =
+                UTILS_MAP_STORY_KEY_F_ENABLED.get().unwrap().lock().unwrap();
+            if !*map_story_key_f_enabled {
+                return;
+            }
+            let hsr_hwnd = get_hsr_hwnd();
+            let hwnd = unsafe { OUR_HWND.get().unwrap().clone() };
+            if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) {
+                return;
+            }
+            match rdev::simulate(&EventType::KeyPress(Key::Space)) {
+                Ok(()) => (),
+                Err(_) => {
+                    error!("We could not send {:?}", Key::Space);
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+            match rdev::simulate(&EventType::KeyRelease(Key::Space)) {
+                Ok(()) => (),
+                Err(_) => {
+                    error!("We could not send {:?}", Key::Space);
+                }
+            }
+        }
+        fn press_space_if_map_story_key_enter() {
+            let map_story_key_enter_enabled =
+                UTILS_MAP_STORY_KEY_ENTER_ENABLED.get().unwrap().lock().unwrap();
+            if !*map_story_key_enter_enabled {
                 return;
             }
             let hsr_hwnd = get_hsr_hwnd();
@@ -141,8 +170,8 @@ fn main() -> eframe::Result<()> {
                 rdev::EventType::KeyPress(code) => {
                     debug!("Key press: {:?}", code);
                     match code {
-                        Key::KeyF => press_space_if_map_story_key(),
-                        Key::Return => press_space_if_map_story_key(),
+                        Key::KeyF => press_space_if_map_story_key_f(),
+                        Key::Return => press_space_if_map_story_key_enter(),
                         _ => {}
                     }
                 }
@@ -168,7 +197,8 @@ fn main() -> eframe::Result<()> {
 
 #[derive(Default)]
 struct RailersEgui {
-    utils_map_story_keys: bool,
+    utils_map_story_key_f: bool,
+    utils_map_story_key_enter: bool,
     utils_msk_custom_key_enabled: bool,
     utils_msk_custom_key: String,
     hsr_hwnd: Option<HWND>,
@@ -190,41 +220,51 @@ fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
         ui.label("These are utilities which enhance your gameplay experience.");
         ui.spacing();
         ui.separator();
-        ui.label("Map story keys (F & Enter to Space)");
-        let map_story_keys_checkbox =
-            ui.checkbox(&mut railers_egui.utils_map_story_keys, "Enabled");
-        let msk_custom_key_checkbox = ui.checkbox(
-            &mut railers_egui.utils_msk_custom_key_enabled,
-            "Custom key (additionally to F & Enter)",
-        );
-        let msk_custom_key_textbox_ui =
-            egui::TextEdit::singleline(&mut railers_egui.utils_msk_custom_key)
-                .hint_text("Key here, only one character is allowed.")
-                .char_limit(1);
-        let msk_custom_key_textbox = ui.add(msk_custom_key_textbox_ui);
-        // Logic
-        if map_story_keys_checkbox.changed() {
-            debug!("Map story keys: {}", railers_egui.utils_map_story_keys);
-            let mut map_story_keys_enabled =
-                UTILS_MAP_STORY_KEYS_ENABLED.get().unwrap().lock().unwrap();
-            *map_story_keys_enabled = railers_egui.utils_map_story_keys;
-        }
-        if msk_custom_key_checkbox.changed() {
-            debug!(
-                "Custom key enabled: {}",
-                railers_egui.utils_msk_custom_key_enabled
+        ui.label("Map story keys (<key> to Space)");
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::LEFT), |ui| {
+            let map_story_key_f_checkbox = ui.checkbox(&mut railers_egui.utils_map_story_key_f, "F");
+            let map_story_key_enter_checkbox = ui.checkbox(&mut railers_egui.utils_map_story_key_enter, "Enter");
+            if map_story_key_f_checkbox.changed() {
+                debug!("Map story key F: {}", railers_egui.utils_map_story_key_f);
+                let mut map_story_key_f_enabled =
+                    UTILS_MAP_STORY_KEY_F_ENABLED.get().unwrap().lock().unwrap();
+                *map_story_key_f_enabled = railers_egui.utils_map_story_key_f;
+            }
+            if map_story_key_enter_checkbox.changed() {
+                debug!("Map story key Enter: {}", railers_egui.utils_map_story_key_enter);
+                let mut map_story_key_enter_enabled =
+                    UTILS_MAP_STORY_KEY_ENTER_ENABLED.get().unwrap().lock().unwrap();
+                *map_story_key_enter_enabled = railers_egui.utils_map_story_key_enter;
+            }
+        });
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::LEFT), |ui| {
+            let msk_custom_key_checkbox = ui.checkbox(
+                &mut railers_egui.utils_msk_custom_key_enabled,
+                "Custom key",
             );
-            // let mut custom_story_keys =
-            //     UTILS_CUSTOM_STORY_KEYS.get().unwrap().lock().unwrap();
-            // if railers_egui.utils_msk_custom_key_enabled {
-            //     *custom_story_keys = Some(Key::KeyF);
-            // } else {
-            //     *custom_story_keys = None;
-            // }
-        }
-        if msk_custom_key_textbox.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            debug!("Custom key: {}", railers_egui.utils_msk_custom_key);
-        }
+            let msk_custom_key_textbox_ui =
+                egui::TextEdit::singleline(&mut railers_egui.utils_msk_custom_key)
+                    .hint_text("Key here, only one character is allowed.")
+                    .char_limit(1);
+            let msk_custom_key_textbox = ui.add(msk_custom_key_textbox_ui);
+            // Logic
+            if msk_custom_key_checkbox.changed() {
+                debug!(
+                    "Custom key enabled: {}",
+                    railers_egui.utils_msk_custom_key_enabled
+                );
+                // let mut custom_story_keys =
+                //     UTILS_CUSTOM_STORY_KEYS.get().unwrap().lock().unwrap();
+                // if railers_egui.utils_msk_custom_key_enabled {
+                //     *custom_story_keys = Some(Key::KeyF);
+                // } else {
+                //     *custom_story_keys = None;
+                // }
+            }
+            if msk_custom_key_textbox.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                debug!("Custom key: {}", railers_egui.utils_msk_custom_key);
+            }
+        });
     });
 }
 
@@ -333,6 +373,7 @@ impl eframe::App for RailersEgui {
                                 SWP_ASYNCWINDOWPOS,
                             )
                             .unwrap();
+                            previous_rect = hsr_rect;
                         }
                         if hidden {
                             ShowWindow(hwnd, SW_SHOW);
