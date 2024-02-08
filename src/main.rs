@@ -43,11 +43,12 @@ pub fn setup_logger(level: &str) -> Result<()> {
 // GUI-specific things
 static USER_HIDDEN: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 // Auto features
-static AUTO_STORY_KEYS_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+static AUTO_STORY_KEY_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 // Utils features
 static UTILS_MAP_STORY_KEY_F_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
 static UTILS_MAP_STORY_KEY_ENTER_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
-static UTILS_CUSTOM_STORY_KEYS: OnceLock<Arc<Mutex<Option<Key>>>> = OnceLock::new();
+static UTILS_CUSTOM_STORY_KEY_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
+static UTILS_CUSTOM_STORY_KEY: OnceLock<Arc<Mutex<Option<String>>>> = OnceLock::new();
 static mut OUR_HWND: OnceLock<HWND> = OnceLock::new();
 
 fn get_hsr_hwnd() -> HWND {
@@ -63,10 +64,11 @@ fn is_hsr_or_overlay_inactive(hsr_hwnd: HWND, our_hwnd: HWND) -> bool {
         hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd && fg_hwnd != our_hwnd)
     }
 }
-
 fn main() -> eframe::Result<()> {
     setup_logger("debug").unwrap();
+    info!("Railers v{}", env!("CARGO_PKG_VERSION"));
     // Initialize global variables
+    info!("Initializing global variables...");
     // GUI
     USER_HIDDEN.set(Arc::new(Mutex::new(false))).unwrap();
     // Utils
@@ -76,9 +78,13 @@ fn main() -> eframe::Result<()> {
     UTILS_MAP_STORY_KEY_ENTER_ENABLED
         .set(Arc::new(Mutex::new(false)))
         .unwrap();
-    UTILS_CUSTOM_STORY_KEYS
+    UTILS_CUSTOM_STORY_KEY_ENABLED
+        .set(Arc::new(Mutex::new(false)))
+        .unwrap();
+    UTILS_CUSTOM_STORY_KEY
         .set(Arc::new(Mutex::new(None)))
         .unwrap();
+    info!("Registering hotkeys...");
     // Initialize hotkey manager
     let manager = GlobalHotKeyManager::new().unwrap();
     // Toggle GUI
@@ -135,8 +141,11 @@ fn main() -> eframe::Result<()> {
             }
         }
         fn press_space_if_map_story_key_enter() {
-            let map_story_key_enter_enabled =
-                UTILS_MAP_STORY_KEY_ENTER_ENABLED.get().unwrap().lock().unwrap();
+            let map_story_key_enter_enabled = UTILS_MAP_STORY_KEY_ENTER_ENABLED
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap();
             if !*map_story_key_enter_enabled {
                 return;
             }
@@ -169,10 +178,47 @@ fn main() -> eframe::Result<()> {
             match event.event_type {
                 rdev::EventType::KeyPress(code) => {
                     debug!("Key press: {:?}", code);
+                    debug!("OS Key press: {:?}", event.name);
                     match code {
                         Key::KeyF => press_space_if_map_story_key_f(),
                         Key::Return => press_space_if_map_story_key_enter(),
                         _ => {}
+                    }
+                    if *UTILS_CUSTOM_STORY_KEY_ENABLED
+                        .get()
+                        .unwrap()
+                        .lock()
+                        .unwrap()
+                    {
+                        let custom_story_key =
+                            UTILS_CUSTOM_STORY_KEY.get().unwrap().lock().unwrap();
+                        debug!("Custom story key: {:?}", custom_story_key);
+                        if custom_story_key.is_none() || event.name.is_none() {
+                            return;
+                        }
+                        let custom_story_key = custom_story_key.as_ref().unwrap();
+                        if event.name.unwrap() == *custom_story_key {
+                            thread::spawn(|| {
+                                let hsr_hwnd = get_hsr_hwnd();
+                                let hwnd = unsafe { OUR_HWND.get().unwrap().clone() };
+                                if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) {
+                                    return;
+                                }
+                                match rdev::simulate(&EventType::KeyPress(Key::Space)) {
+                                    Ok(()) => (),
+                                    Err(_) => {
+                                        error!("We could not send {:?}", Key::Space);
+                                    }
+                                }
+                                thread::sleep(Duration::from_millis(10));
+                                match rdev::simulate(&EventType::KeyRelease(Key::Space)) {
+                                    Ok(()) => (),
+                                    Err(_) => {
+                                        error!("We could not send {:?}", Key::Space);
+                                    }
+                                }
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -222,8 +268,11 @@ fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
         ui.separator();
         ui.label("Map story keys (<key> to Space)");
         ui.with_layout(egui::Layout::left_to_right(egui::Align::LEFT), |ui| {
-            let map_story_key_f_checkbox = ui.checkbox(&mut railers_egui.utils_map_story_key_f, "F");
-            let map_story_key_enter_checkbox = ui.checkbox(&mut railers_egui.utils_map_story_key_enter, "Enter");
+            let map_story_key_f_checkbox =
+                ui.checkbox(&mut railers_egui.utils_map_story_key_f, "F");
+            let map_story_key_enter_checkbox =
+                ui.checkbox(&mut railers_egui.utils_map_story_key_enter, "Enter");
+            // Logic
             if map_story_key_f_checkbox.changed() {
                 debug!("Map story key F: {}", railers_egui.utils_map_story_key_f);
                 let mut map_story_key_f_enabled =
@@ -231,17 +280,21 @@ fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
                 *map_story_key_f_enabled = railers_egui.utils_map_story_key_f;
             }
             if map_story_key_enter_checkbox.changed() {
-                debug!("Map story key Enter: {}", railers_egui.utils_map_story_key_enter);
-                let mut map_story_key_enter_enabled =
-                    UTILS_MAP_STORY_KEY_ENTER_ENABLED.get().unwrap().lock().unwrap();
+                debug!(
+                    "Map story key Enter: {}",
+                    railers_egui.utils_map_story_key_enter
+                );
+                let mut map_story_key_enter_enabled = UTILS_MAP_STORY_KEY_ENTER_ENABLED
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .unwrap();
                 *map_story_key_enter_enabled = railers_egui.utils_map_story_key_enter;
             }
         });
         ui.with_layout(egui::Layout::left_to_right(egui::Align::LEFT), |ui| {
-            let msk_custom_key_checkbox = ui.checkbox(
-                &mut railers_egui.utils_msk_custom_key_enabled,
-                "Custom key",
-            );
+            let msk_custom_key_checkbox =
+                ui.checkbox(&mut railers_egui.utils_msk_custom_key_enabled, "Custom key");
             let msk_custom_key_textbox_ui =
                 egui::TextEdit::singleline(&mut railers_egui.utils_msk_custom_key)
                     .hint_text("Key here, only one character is allowed.")
@@ -253,16 +306,22 @@ fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
                     "Custom key enabled: {}",
                     railers_egui.utils_msk_custom_key_enabled
                 );
-                // let mut custom_story_keys =
-                //     UTILS_CUSTOM_STORY_KEYS.get().unwrap().lock().unwrap();
-                // if railers_egui.utils_msk_custom_key_enabled {
-                //     *custom_story_keys = Some(Key::KeyF);
-                // } else {
-                //     *custom_story_keys = None;
-                // }
+                let mut msk_custom_key_enabled = UTILS_CUSTOM_STORY_KEY_ENABLED
+                    .get()
+                    .unwrap()
+                    .lock()
+                    .unwrap();
+                *msk_custom_key_enabled = railers_egui.utils_msk_custom_key_enabled;
             }
-            if msk_custom_key_textbox.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if msk_custom_key_textbox.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            {
                 debug!("Custom key: {}", railers_egui.utils_msk_custom_key);
+                let mut msk_custom_key = UTILS_CUSTOM_STORY_KEY.get().unwrap().lock().unwrap();
+                if railers_egui.utils_msk_custom_key.len() == 0 {
+                    *msk_custom_key = None;
+                    return;
+                }
+                *msk_custom_key = Some(railers_egui.utils_msk_custom_key.clone());
             }
         });
     });
