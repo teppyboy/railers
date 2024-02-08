@@ -1,11 +1,15 @@
+mod settings;
+mod utils;
+
 use eframe::egui;
 use egui::{Context, Vec2, ViewportBuilder};
 use global_hotkey::{
     hotkey::{Code, HotKey, Modifiers},
     GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
-use log::{debug, error, info, trace};
-use rdev::{listen, Event, EventType, Key};
+use log::{debug, info, trace};
+use rdev::{listen, Event, Key};
+use settings::Settings;
 use std::{
     ffi::c_void,
     sync::{Arc, Mutex, OnceLock},
@@ -40,15 +44,9 @@ pub fn setup_logger(level: &str) -> Result<()> {
     Ok(())
 }
 
+static SETTINGS: OnceLock<Arc<Mutex<Settings>>> = OnceLock::new();
 // GUI-specific things
 static USER_HIDDEN: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
-// Auto features
-static AUTO_STORY_KEY_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
-// Utils features
-static UTILS_MAP_STORY_KEY_F_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
-static UTILS_MAP_STORY_KEY_ENTER_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
-static UTILS_CUSTOM_STORY_KEY_ENABLED: OnceLock<Arc<Mutex<bool>>> = OnceLock::new();
-static UTILS_CUSTOM_STORY_KEY: OnceLock<Arc<Mutex<Option<String>>>> = OnceLock::new();
 static mut OUR_HWND: OnceLock<HWND> = OnceLock::new();
 
 fn get_hsr_hwnd() -> HWND {
@@ -64,26 +62,26 @@ fn is_hsr_or_overlay_inactive(hsr_hwnd: HWND, our_hwnd: HWND) -> bool {
         hsr_hwnd.0 == 0 || (fg_hwnd != hsr_hwnd && fg_hwnd != our_hwnd)
     }
 }
+
+///
+/// Get a copy of the current settings.
+///
+/// To write to the settings, use the `SETTINGS` global variable.
+///
+fn get_settings() -> Settings {
+    SETTINGS.get().unwrap().lock().unwrap().clone()
+}
+
 fn main() -> eframe::Result<()> {
     setup_logger("debug").unwrap();
     info!("Railers v{}", env!("CARGO_PKG_VERSION"));
     // Initialize global variables
-    info!("Initializing global variables...");
+    info!("Initializing settings...");
+    SETTINGS
+        .set(Arc::new(Mutex::new(Settings::default())))
+        .unwrap();
     // GUI
     USER_HIDDEN.set(Arc::new(Mutex::new(false))).unwrap();
-    // Utils
-    UTILS_MAP_STORY_KEY_F_ENABLED
-        .set(Arc::new(Mutex::new(false)))
-        .unwrap();
-    UTILS_MAP_STORY_KEY_ENTER_ENABLED
-        .set(Arc::new(Mutex::new(false)))
-        .unwrap();
-    UTILS_CUSTOM_STORY_KEY_ENABLED
-        .set(Arc::new(Mutex::new(false)))
-        .unwrap();
-    UTILS_CUSTOM_STORY_KEY
-        .set(Arc::new(Mutex::new(None)))
-        .unwrap();
     info!("Registering hotkeys...");
     // Initialize hotkey manager
     let manager = GlobalHotKeyManager::new().unwrap();
@@ -115,10 +113,8 @@ fn main() -> eframe::Result<()> {
     });
     // Map story keys
     thread::spawn(|| {
-        fn press_space_if_map_story_key_f() {
-            let map_story_key_f_enabled =
-                UTILS_MAP_STORY_KEY_F_ENABLED.get().unwrap().lock().unwrap();
-            if !*map_story_key_f_enabled {
+        fn press_space_if_map_story_key(key_enabled: bool) {
+            if !key_enabled {
                 return;
             }
             let hsr_hwnd = get_hsr_hwnd();
@@ -126,47 +122,7 @@ fn main() -> eframe::Result<()> {
             if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) {
                 return;
             }
-            match rdev::simulate(&EventType::KeyPress(Key::Space)) {
-                Ok(()) => (),
-                Err(_) => {
-                    error!("We could not send {:?}", Key::Space);
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-            match rdev::simulate(&EventType::KeyRelease(Key::Space)) {
-                Ok(()) => (),
-                Err(_) => {
-                    error!("We could not send {:?}", Key::Space);
-                }
-            }
-        }
-        fn press_space_if_map_story_key_enter() {
-            let map_story_key_enter_enabled = UTILS_MAP_STORY_KEY_ENTER_ENABLED
-                .get()
-                .unwrap()
-                .lock()
-                .unwrap();
-            if !*map_story_key_enter_enabled {
-                return;
-            }
-            let hsr_hwnd = get_hsr_hwnd();
-            let hwnd = unsafe { OUR_HWND.get().unwrap().clone() };
-            if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) {
-                return;
-            }
-            match rdev::simulate(&EventType::KeyPress(Key::Space)) {
-                Ok(()) => (),
-                Err(_) => {
-                    error!("We could not send {:?}", Key::Space);
-                }
-            }
-            thread::sleep(Duration::from_millis(10));
-            match rdev::simulate(&EventType::KeyRelease(Key::Space)) {
-                Ok(()) => (),
-                Err(_) => {
-                    error!("We could not send {:?}", Key::Space);
-                }
-            }
+            utils::press_key(Key::Space);
         }
         // This will block.
         if let Err(error) = listen(callback) {
@@ -179,19 +135,17 @@ fn main() -> eframe::Result<()> {
                 rdev::EventType::KeyPress(code) => {
                     debug!("Key press: {:?}", code);
                     debug!("OS Key press: {:?}", event.name);
+                    let settings = get_settings();
+                    debug!("Settings: {:?}", settings);
                     match code {
-                        Key::KeyF => press_space_if_map_story_key_f(),
-                        Key::Return => press_space_if_map_story_key_enter(),
+                        Key::KeyF => press_space_if_map_story_key(settings.utils.msk.f_enabled),
+                        Key::Return => {
+                            press_space_if_map_story_key(settings.utils.msk.enter_enabled)
+                        }
                         _ => {}
                     }
-                    if *UTILS_CUSTOM_STORY_KEY_ENABLED
-                        .get()
-                        .unwrap()
-                        .lock()
-                        .unwrap()
-                    {
-                        let custom_story_key =
-                            UTILS_CUSTOM_STORY_KEY.get().unwrap().lock().unwrap();
+                    if settings.utils.msk.custom_key_enabled {
+                        let custom_story_key = settings.utils.msk.custom_key;
                         debug!("Custom story key: {:?}", custom_story_key);
                         if custom_story_key.is_none() || event.name.is_none() {
                             return;
@@ -204,19 +158,7 @@ fn main() -> eframe::Result<()> {
                                 if is_hsr_or_overlay_inactive(hsr_hwnd, hwnd) {
                                     return;
                                 }
-                                match rdev::simulate(&EventType::KeyPress(Key::Space)) {
-                                    Ok(()) => (),
-                                    Err(_) => {
-                                        error!("We could not send {:?}", Key::Space);
-                                    }
-                                }
-                                thread::sleep(Duration::from_millis(10));
-                                match rdev::simulate(&EventType::KeyRelease(Key::Space)) {
-                                    Ok(()) => (),
-                                    Err(_) => {
-                                        error!("We could not send {:?}", Key::Space);
-                                    }
-                                }
+                                utils::press_key(Key::Space);
                             });
                         }
                     }
@@ -275,21 +217,16 @@ fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
             // Logic
             if map_story_key_f_checkbox.changed() {
                 debug!("Map story key F: {}", railers_egui.utils_map_story_key_f);
-                let mut map_story_key_f_enabled =
-                    UTILS_MAP_STORY_KEY_F_ENABLED.get().unwrap().lock().unwrap();
-                *map_story_key_f_enabled = railers_egui.utils_map_story_key_f;
+                let mut settings = SETTINGS.get().unwrap().lock().unwrap();
+                (*settings).utils.msk.f_enabled = railers_egui.utils_map_story_key_f;
             }
             if map_story_key_enter_checkbox.changed() {
                 debug!(
                     "Map story key Enter: {}",
                     railers_egui.utils_map_story_key_enter
                 );
-                let mut map_story_key_enter_enabled = UTILS_MAP_STORY_KEY_ENTER_ENABLED
-                    .get()
-                    .unwrap()
-                    .lock()
-                    .unwrap();
-                *map_story_key_enter_enabled = railers_egui.utils_map_story_key_enter;
+                let mut settings = SETTINGS.get().unwrap().lock().unwrap();
+                (*settings).utils.msk.enter_enabled = railers_egui.utils_map_story_key_enter;
             }
         });
         ui.with_layout(egui::Layout::left_to_right(egui::Align::LEFT), |ui| {
@@ -306,22 +243,19 @@ fn utils_window(ctx: &Context, railers_egui: &mut RailersEgui) {
                     "Custom key enabled: {}",
                     railers_egui.utils_msk_custom_key_enabled
                 );
-                let mut msk_custom_key_enabled = UTILS_CUSTOM_STORY_KEY_ENABLED
-                    .get()
-                    .unwrap()
-                    .lock()
-                    .unwrap();
-                *msk_custom_key_enabled = railers_egui.utils_msk_custom_key_enabled;
+                let mut settings = SETTINGS.get().unwrap().lock().unwrap();
+                (*settings).utils.msk.custom_key_enabled =
+                    railers_egui.utils_msk_custom_key_enabled;
             }
             if msk_custom_key_textbox.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
             {
                 debug!("Custom key: {}", railers_egui.utils_msk_custom_key);
-                let mut msk_custom_key = UTILS_CUSTOM_STORY_KEY.get().unwrap().lock().unwrap();
+                let mut settings = SETTINGS.get().unwrap().lock().unwrap();
                 if railers_egui.utils_msk_custom_key.len() == 0 {
-                    *msk_custom_key = None;
+                    (*settings).utils.msk.custom_key = None;
                     return;
                 }
-                *msk_custom_key = Some(railers_egui.utils_msk_custom_key.clone());
+                (*settings).utils.msk.custom_key = Some(railers_egui.utils_msk_custom_key.clone());
             }
         });
     });
